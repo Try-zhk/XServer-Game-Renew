@@ -52,11 +52,15 @@ jobs:
           sleep 3
 
           echo "✅ sing-box 已启动，测试连通性..."
-          if ! curl -s -m 8 -x http://127.0.0.1:8080 https://api.ipify.org; then
+          CURL_OUT=$(curl -s -m 8 -x http://127.0.0.1:8080 https://api.ipify.org)
+          CURL_STATUS=$?
+          if [ $CURL_STATUS -ne 0 ] || [ -z "$CURL_OUT" ]; then
             echo "⚠️  sing-box 代理连通性测试失败，输出日志："
             cat singbox.log
+          else
+            MASKED_IP=$(echo "$CURL_OUT" | sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/')
+            echo "✅ 代理出口 IP（已脱敏）：$MASKED_IP"
           fi
-          echo
 
       - name: 🔧 执行续期
         env:
