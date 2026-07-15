@@ -1,0 +1,66 @@
+name: XServer-Game-Renew
+on:
+  workflow_dispatch:
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 📥 拉取本库脚本
+        uses: actions/checkout@v4
+
+      - name: 📥 拉取私库脚本
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/XServer-Game-Renew-Private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
+
+      - name: 📂 复制脚本到工作目录
+        run: cp private/xserver_game_renew.py xserver_game_renew.py
+
+      - name: 🐍 安装 Python 依赖
+        run: pip install requests --quiet
+
+      - name: 🛡️ 启动 sing-box 代理转发
+        if: ${{ env.PROXY_URL != '' }}
+        env:
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+        run: |
+          echo "📦 下载 sing-box..."
+          SB_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+          echo "📦 sing-box 版本: $SB_VERSION"
+
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) SB_ARCH="amd64" ;;
+            aarch64|arm64) SB_ARCH="arm64" ;;
+            *) SB_ARCH="amd64" ;;
+          esac
+
+          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
+          tar -xzf "sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
+          cp "sing-box-${SB_VERSION}-linux-${SB_ARCH}/sing-box" ./sing-box
+          chmod +x ./sing-box
+
+          echo "🔧 解析代理链接，生成 sing-box 配置..."
+          python3 gen_singbox_config.py "$PROXY_URL" > singbox.json
+
+          nohup ./sing-box run -c singbox.json > singbox.log 2>&1 &
+          sleep 3
+
+          echo "✅ sing-box 已启动，测试连通性..."
+          if ! curl -s -m 8 -x http://127.0.0.1:8080 https://api.ipify.org; then
+            echo "⚠️  sing-box 代理连通性测试失败，输出日志："
+            cat singbox.log
+          fi
+          echo
+
+      - name: 🔧 执行续期
+        env:
+          XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+        run: python3 xserver_game_renew.py
