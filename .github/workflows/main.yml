@@ -34,17 +34,8 @@ jobs:
             exit 0
           fi
 
-          echo "📦 下载 sing-box..."
-          SB_VERSION=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-            | grep '"tag_name"' \
-            | cut -d '"' -f 4 \
-            | tr -d 'v')
-
-          if [ -z "$SB_VERSION" ]; then
-            echo "❌ 无法获取 sing-box 最新版本号。"
-            exit 1
-          fi
-
+          echo "📦 使用固定版本 sing-box（避免每次请求 GitHub API 被限流）..."
+          SB_VERSION="1.11.15"
           echo "📦 sing-box 版本: $SB_VERSION"
 
           ARCH=$(uname -m)
@@ -124,3 +115,4 @@ jobs:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           TG_BOT: ${{ secrets.TG_BOT }}
         run: python3 xserver_game_renew.py
+
