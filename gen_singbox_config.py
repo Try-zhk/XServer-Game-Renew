@@ -235,6 +235,7 @@ def parse_socks(link: str) -> dict:
     else:
         hostport = hostpart
 
+    hostport = hostport.split("/")[0]
     host, port = hostport.rsplit(":", 1)
     out = {
         "type": "socks",
