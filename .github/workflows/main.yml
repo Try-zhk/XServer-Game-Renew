@@ -1,4 +1,5 @@
 name: XServer-Game-Renew
+
 on:
   workflow_dispatch:
 
@@ -25,41 +26,96 @@ jobs:
         run: pip install requests --quiet
 
       - name: 🛡️ 启动 sing-box 代理转发
-        if: ${{ env.PROXY_URL != '' }}
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
         run: |
+          if [ -z "$PROXY_URL" ]; then
+            echo "ℹ️ 未设置 PROXY_URL，跳过 sing-box 代理启动。"
+            exit 0
+          fi
+
           echo "📦 下载 sing-box..."
-          SB_VERSION=$(curl -s https://api.github.com/repos/SagerNet/sing-box/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+          SB_VERSION=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+            | grep '"tag_name"' \
+            | cut -d '"' -f 4 \
+            | tr -d 'v')
+
+          if [ -z "$SB_VERSION" ]; then
+            echo "❌ 无法获取 sing-box 最新版本号。"
+            exit 1
+          fi
+
           echo "📦 sing-box 版本: $SB_VERSION"
 
           ARCH=$(uname -m)
           case "$ARCH" in
-            x86_64) SB_ARCH="amd64" ;;
-            aarch64|arm64) SB_ARCH="arm64" ;;
-            *) SB_ARCH="amd64" ;;
+            x86_64)
+              SB_ARCH="amd64"
+              ;;
+            aarch64|arm64)
+              SB_ARCH="arm64"
+              ;;
+            *)
+              echo "❌ 不支持的系统架构: $ARCH"
+              exit 1
+              ;;
           esac
 
-          wget -q "https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
-          tar -xzf "sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
-          cp "sing-box-${SB_VERSION}-linux-${SB_ARCH}/sing-box" ./sing-box
+          SB_FILE="sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
+          SB_DIR="sing-box-${SB_VERSION}-linux-${SB_ARCH}"
+
+          curl -fL --retry 3 \
+            -o "$SB_FILE" \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/${SB_FILE}"
+
+          tar -xzf "$SB_FILE"
+          cp "${SB_DIR}/sing-box" ./sing-box
           chmod +x ./sing-box
 
           echo "🔧 解析代理链接，生成 sing-box 配置..."
           python3 gen_singbox_config.py "$PROXY_URL" > singbox.json
 
+          echo "🔍 检查 sing-box 配置..."
+          if ! ./sing-box check -c singbox.json; then
+            echo "❌ sing-box 配置检查失败，当前配置如下："
+            cat singbox.json
+            exit 1
+          fi
+
+          echo "🚀 启动 sing-box..."
           nohup ./sing-box run -c singbox.json > singbox.log 2>&1 &
+          SB_PID=$!
+
           sleep 3
 
-          echo "✅ sing-box 已启动，测试连通性..."
-          CURL_OUT=$(curl -s -m 8 -x http://127.0.0.1:8080 https://api.ipify.org)
-          CURL_STATUS=$?
-          if [ $CURL_STATUS -ne 0 ] || [ -z "$CURL_OUT" ]; then
-            echo "⚠️  sing-box 代理连通性测试失败，输出日志："
+          if ! kill -0 "$SB_PID" 2>/dev/null; then
+            echo "❌ sing-box 启动后异常退出，日志如下："
             cat singbox.log
-          else
+            exit 1
+          fi
+
+          echo "✅ sing-box 已启动，测试代理连通性..."
+
+          # curl 放进 if 判断中，可避免 set -e 在 curl 失败时提前中断步骤。
+          if CURL_OUT=$(curl -sS -m 12 \
+            --proxy http://127.0.0.1:8080 \
+            https://api.ipify.org); then
+
+            if [ -z "$CURL_OUT" ]; then
+              echo "❌ 代理连接成功，但出口 IP 接口未返回内容。"
+              echo "----- sing-box 日志 -----"
+              cat singbox.log
+              exit 1
+            fi
+
             MASKED_IP=$(echo "$CURL_OUT" | sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/')
             echo "✅ 代理出口 IP（已脱敏）：$MASKED_IP"
+          else
+            CURL_STATUS=$?
+            echo "❌ sing-box 代理连通性测试失败，curl exit code: $CURL_STATUS"
+            echo "----- sing-box 日志 -----"
+            cat singbox.log
+            exit 1
           fi
 
       - name: 🔧 执行续期
