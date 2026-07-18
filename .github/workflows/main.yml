@@ -131,11 +131,12 @@ jobs:
           RUN_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S (北京时间)')
           RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
-          MSG="🎮 XServer Game 续期通知
-🕐 运行时间: ${RUN_TIME}
-🖥 服务器: XServer Game 🇯🇵
-📊 续期结果: ❌ 续期失败！
-📝 原因: 在续期脚本运行之前（如 sing-box 代理启动阶段）就已失败，脚本内部的通知逻辑没机会执行，此为工作流级别兜底通知。详细原因请查看 Actions 日志：${RUN_URL}"
+          MSG=$(printf '%s\n%s\n%s\n%s\n%s' \
+            "🎮 XServer Game 续期通知" \
+            "🕐 运行时间: ${RUN_TIME}" \
+            "🖥 服务器: XServer Game 🇯🇵" \
+            "📊 续期结果: ❌ 续期失败！" \
+            "📝 原因: 在续期脚本运行之前（如 sing-box 代理启动阶段）就已失败，脚本内部的通知逻辑没机会执行，此为工作流级别兜底通知。详细原因请查看 Actions 日志：${RUN_URL}")
 
           curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
             -d chat_id="${CHAT_ID}" \
