@@ -64,7 +64,7 @@ jobs:
           chmod +x ./sing-box
 
           echo "🔧 解析代理链接，生成 sing-box 配置..."
-          python3 gen_singbox_config.py "$PROXY_URL" > singbox.json
+          python3 linktosb.py "$PROXY_URL" -o singbox.json --port 8080
 
           echo "🔍 检查 sing-box 配置..."
           if ! ./sing-box check -c singbox.json; then
