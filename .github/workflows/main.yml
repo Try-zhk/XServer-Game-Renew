@@ -6,7 +6,7 @@ on:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
 
     steps:
       - name: 📥 拉取本库脚本
@@ -110,14 +110,16 @@ jobs:
           fi
 
       - name: 🔧 执行续期
+        id: renew
         env:
           XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
           TG_BOT: ${{ secrets.TG_BOT }}
+          SINGBOX_LOG_PATH: singbox.log
         run: python3 xserver_game_renew.py
 
       - name: 📨 工作流级失败兜底通知
-        if: failure()
+        if: failure() && steps.renew.outcome != 'failure'
         env:
           TG_BOT: ${{ secrets.TG_BOT }}
         run: |
