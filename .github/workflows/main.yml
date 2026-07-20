@@ -20,7 +20,9 @@ jobs:
           path: private
 
       - name: 📂 复制脚本到工作目录
-        run: cp private/xserver_game_renew.py xserver_game_renew.py
+        run: |
+          cp private/xserver_game_renew.py xserver_game_renew.py
+          cp private/linktosb.py linktosb.py
 
       - name: 🐍 安装 Python 依赖
         run: pip install requests --quiet
