@@ -36,34 +36,25 @@ jobs:
             exit 0
           fi
 
-          echo "📦 使用固定版本 sing-box（避免每次请求 GitHub API 被限流）..."
-          SB_VERSION="1.11.15"
-          echo "📦 sing-box 版本: $SB_VERSION"
+          echo "📦 在私库里查找 sing-box 压缩包..."
+          SB_ARCHIVE=$(ls private/sing-box-*-linux-amd64.tar.gz 2>/dev/null | head -n1)
+          if [ -z "$SB_ARCHIVE" ]; then
+            echo "❌ 私库里没找到 sing-box-*-linux-amd64.tar.gz，请检查是否已上传（文件名需匹配这个模式）。"
+            exit 1
+          fi
 
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64)
-              SB_ARCH="amd64"
-              ;;
-            aarch64|arm64)
-              SB_ARCH="arm64"
-              ;;
-            *)
-              echo "❌ 不支持的系统架构: $ARCH"
-              exit 1
-              ;;
-          esac
+          MATCH_COUNT=$(ls private/sing-box-*-linux-amd64.tar.gz 2>/dev/null | wc -l)
+          if [ "$MATCH_COUNT" -gt 1 ]; then
+            echo "⚠️  私库里有多个 sing-box 压缩包，取到的是: $SB_ARCHIVE"
+            echo "⚠️  建议只保留一个版本，避免以后自己也搞混用的是哪个。"
+          fi
+          echo "📦 使用: $SB_ARCHIVE"
 
-          SB_FILE="sing-box-${SB_VERSION}-linux-${SB_ARCH}.tar.gz"
-          SB_DIR="sing-box-${SB_VERSION}-linux-${SB_ARCH}"
-
-          curl -fL --retry 3 \
-            -o "$SB_FILE" \
-            "https://github.com/SagerNet/sing-box/releases/download/v${SB_VERSION}/${SB_FILE}"
-
-          tar -xzf "$SB_FILE"
-          cp "${SB_DIR}/sing-box" ./sing-box
+          mkdir -p sb_extract
+          tar -xzf "$SB_ARCHIVE" --strip-components=1 -C sb_extract
+          cp sb_extract/sing-box ./sing-box
           chmod +x ./sing-box
+          ./sing-box version
 
           echo "🔧 解析代理链接，生成 sing-box 配置..."
           python3 linktosb.py "$PROXY_URL" -o singbox.json --port 8080
