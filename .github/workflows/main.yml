@@ -6,6 +6,7 @@ on:
 jobs:
   renew:
     runs-on: ubuntu-latest
+    # 过盾最多 3 轮 × 4 策略，8 分钟不够用，放宽到 15 分钟
     timeout-minutes: 15
 
     steps:
@@ -25,17 +26,17 @@ jobs:
           cp private/linktosb.py linktosb.py
 
       - name: 🐍 安装 Python 依赖
-        run: pip install requests playwright --quiet
+        run: pip install requests --quiet
 
       - name: 🌐 安装 Playwright 浏览器（Turnstile 过盾用）
-        # 无 Turnstile 时脚本不会启动浏览器，这一步只是提前备好环境；
-        # install-deps 需要 sudo，github-hosted 的 ubuntu-latest 默认免密可用。
-        # 另装 xvfb：Playwright 默认无头用的是 headless shell，指纹易被 CF 区别对待，
-        # 过盾时改用 xvfb-run 有头模式跑完整版 Chromium（见「执行续期」步骤）。
         run: |
-          python3 -m playwright install chromium
-          python3 -m playwright install-deps chromium
-          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+          pip install playwright patchright --quiet
+          # 内置 Chromium 作为真 Chrome 启动失败时的回退
+          playwright install chromium
+          patchright install chromium || true
+          # runner 一般自带 xvfb 和 Google Chrome，这里只做缺失时的补装与版本确认
+          command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
+          google-chrome --version || echo "ℹ️ 未检测到系统 Chrome，将回退内置 Chromium"
 
       - name: 🛡️ 启动 sing-box 代理转发
         env:
@@ -119,16 +120,22 @@ jobs:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           TG_BOT: ${{ secrets.TG_BOT }}
           SINGBOX_LOG_PATH: singbox.log
-          TURNSTILE_HEADLESS: "0"  # xvfb 有头模式跑完整版 Chromium，headless shell 易被 CF 拦截
+          # 过盾：xvfb 下跑有头模式；真 Chrome；时区与日本出口一致
+          TURNSTILE_HEADLESS: "0"
+          TURNSTILE_CHANNEL: chrome
+          TURNSTILE_TZ: Asia/Tokyo
+          # 可选：浏览器过盾全部失败后的 CapSolver 打码兜底（没设 secret 则自动不启用）
+          CAPSOLVER_KEY: ${{ secrets.CAPSOLVER_KEY }}
         run: xvfb-run -a python3 xserver_game_renew.py
 
       - name: 📸 上传过盾失败截图（如有）
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: turnstile-debug
+          name: turnstile-fail-screenshots
           path: turnstile_fail*.png
           if-no-files-found: ignore
+          retention-days: 3
 
       - name: 📨 工作流级失败兜底通知
         if: failure() && steps.renew.outcome != 'failure'
