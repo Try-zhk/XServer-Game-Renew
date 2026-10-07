@@ -6,7 +6,7 @@ on:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
 
     steps:
       - name: 📥 拉取本库脚本
@@ -25,7 +25,14 @@ jobs:
           cp private/linktosb.py linktosb.py
 
       - name: 🐍 安装 Python 依赖
-        run: pip install requests --quiet
+        run: pip install requests playwright --quiet
+
+      - name: 🌐 安装 Playwright 浏览器（Turnstile 过盾用）
+        # 无 Turnstile 时脚本不会启动浏览器，这一步只是提前备好环境；
+        # install-deps 需要 sudo，github-hosted 的 ubuntu-latest 默认免密可用。
+        run: |
+          python3 -m playwright install chromium
+          python3 -m playwright install-deps chromium
 
       - name: 🛡️ 启动 sing-box 代理转发
         env:
