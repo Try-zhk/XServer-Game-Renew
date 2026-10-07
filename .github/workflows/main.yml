@@ -30,9 +30,12 @@ jobs:
       - name: 🌐 安装 Playwright 浏览器（Turnstile 过盾用）
         # 无 Turnstile 时脚本不会启动浏览器，这一步只是提前备好环境；
         # install-deps 需要 sudo，github-hosted 的 ubuntu-latest 默认免密可用。
+        # 另装 xvfb：Playwright 默认无头用的是 headless shell，指纹易被 CF 区别对待，
+        # 过盾时改用 xvfb-run 有头模式跑完整版 Chromium（见「执行续期」步骤）。
         run: |
           python3 -m playwright install chromium
           python3 -m playwright install-deps chromium
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
 
       - name: 🛡️ 启动 sing-box 代理转发
         env:
@@ -116,7 +119,16 @@ jobs:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           TG_BOT: ${{ secrets.TG_BOT }}
           SINGBOX_LOG_PATH: singbox.log
-        run: python3 xserver_game_renew.py
+          TURNSTILE_HEADLESS: "0"  # xvfb 有头模式跑完整版 Chromium，headless shell 易被 CF 拦截
+        run: xvfb-run -a python3 xserver_game_renew.py
+
+      - name: 📸 上传过盾失败截图（如有）
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: turnstile-debug
+          path: turnstile_fail*.png
+          if-no-files-found: ignore
 
       - name: 📨 工作流级失败兜底通知
         if: failure() && steps.renew.outcome != 'failure'
