@@ -28,15 +28,12 @@ jobs:
       - name: 🐍 安装 Python 依赖
         run: pip install requests --quiet
 
-      - name: 🌐 安装 Playwright 浏览器（Turnstile 过盾用）
+      - name: 🌐 安装浏览器依赖（patchright + 真 Chrome，Turnstile 过盾用）
         run: |
-          pip install playwright patchright --quiet
-          # 内置 Chromium 作为真 Chrome 启动失败时的回退
-          playwright install chromium
-          patchright install chromium || true
-          # runner 一般自带 xvfb 和 Google Chrome，这里只做缺失时的补装与版本确认
-          command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
-          google-chrome --version || echo "ℹ️ 未检测到系统 Chrome，将回退内置 Chromium"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb
+          pip install patchright --quiet
+          python -m patchright install --with-deps chrome
 
       - name: 🛡️ 启动 sing-box 代理转发
         env:
@@ -120,13 +117,12 @@ jobs:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           TG_BOT: ${{ secrets.TG_BOT }}
           SINGBOX_LOG_PATH: singbox.log
-          # 过盾：xvfb 下跑有头模式；真 Chrome；时区与日本出口一致
+          # 过盾：xvfb(1920x1080) 下跑有头模式 + 真 Chrome（与参考项目一致）
           TURNSTILE_HEADLESS: "0"
           TURNSTILE_CHANNEL: chrome
-          TURNSTILE_TZ: Asia/Tokyo
           # 可选：浏览器过盾全部失败后的 CapSolver 打码兜底（没设 secret 则自动不启用）
           CAPSOLVER_KEY: ${{ secrets.CAPSOLVER_KEY }}
-        run: xvfb-run -a python3 xserver_game_renew.py
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 -u xserver_game_renew.py
 
       - name: 📸 上传过盾失败截图（如有）
         if: always()
