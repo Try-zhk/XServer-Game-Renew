@@ -30,10 +30,10 @@ jobs:
 
       - name: 🌐 安装浏览器依赖（patchright + 真 Chrome，Turnstile 过盾用）
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq xvfb
           pip install patchright --quiet
-          python -m patchright install --with-deps chrome
+          # ubuntu-latest 自带 Google Chrome 和 xvfb，有就直接用；缺哪个才补装（省下近 3 分钟）
+          google-chrome --version || python -m patchright install --with-deps chrome
+          command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
 
       - name: 🛡️ 启动 sing-box 代理转发
         env:
