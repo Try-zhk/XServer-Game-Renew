@@ -101,14 +101,28 @@ jobs:
             fi
 
             echo "✅ [$ROLE] sing-box 已启动，测试代理连通性..."
-            # curl 放进 if 判断中，避免 set -e 在 curl 失败时提前中断步骤
-            if OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://api.ipify.org); then
+            # 连通性以"非 CF 站点（AWS）"为准，失败再回退 ipify；CF 站点只做信息提示，不影响判定
+            if OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://checkip.amazonaws.com) \
+               || OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://api.ipify.org); then
+              OUT=$(echo "$OUT" | tr -d '[:space:]')
               if [ -z "$OUT" ]; then
                 echo "❌ [$ROLE] 代理连接成功，但出口 IP 接口未返回内容。"
                 tail -n 20 singbox.log | mask_ip
                 return 1
               fi
-              echo "✅ [$ROLE] 代理出口 IP（已脱敏）：$(echo "$OUT" | mask_ip)"
+              echo "✅ [$ROLE] 出口 IP（非 CF 站点，已脱敏）：$(echo "$OUT" | mask_ip)"
+
+              CF=$(curl -sS -m 10 --proxy http://127.0.0.1:8080 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null || true)
+              CF_IP=$(echo "$CF" | sed -n 's/^ip=//p' | head -n1 | tr -d '[:space:]')
+              CF_LOC=$(echo "$CF" | sed -n 's/^colo=//p;s/^loc=//p' | tr -d '\r' | paste -sd/ -)
+              if [ -z "$CF_IP" ]; then
+                echo "⚠️ [$ROLE] CF 站点出口 IP 检测失败（仅提示，不影响运行）"
+              else
+                echo "✅ [$ROLE] 出口 IP（CF 站点，已脱敏）：$(echo "$CF_IP" | mask_ip)（$CF_LOC）"
+                if [ "$CF_IP" != "$OUT" ]; then
+                  echo "⚠️ [$ROLE] CF 站点与非 CF 站点的出口 IP 不同（节点对两类站点走了不同出口）"
+                fi
+              fi
               return 0
             else
               CURL_STATUS=$?
