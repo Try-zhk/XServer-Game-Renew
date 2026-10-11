@@ -6,8 +6,8 @@ on:
 jobs:
   renew:
     runs-on: ubuntu-latest
-    # 过盾最多 3 轮 × 4 策略，8 分钟不够用，放宽到 15 分钟
-    timeout-minutes: 15
+    # 主用 + 备用最多跑两轮续期，最坏情况耗时翻倍，放宽到 25 分钟
+    timeout-minutes: 25
 
     steps:
       - name: 📥 拉取本库脚本
@@ -34,10 +34,13 @@ jobs:
           # ubuntu-latest 自带 Google Chrome 和 xvfb，有就直接用；缺哪个才补装（省下近 3 分钟）
           google-chrome --version || python -m patchright install --with-deps chrome
           command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
+          # 日文字体：让失败截图里的日文正常显示，也让浏览器字体环境更接近真实桌面
+          sudo apt-get install -y -qq --no-install-recommends fonts-ipafont-gothic || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends fonts-ipafont-gothic; }
 
-      - name: 🛡️ 启动 sing-box 代理转发
+      - name: 🛡️ 启动 sing-box 代理转发（主用，不可用时自动切备用）
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
+          PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
         run: |
           if [ -z "$PROXY_URL" ]; then
             echo "ℹ️ 未设置 PROXY_URL，跳过 sing-box 代理启动。"
@@ -64,57 +67,84 @@ jobs:
           chmod +x ./sing-box
           ./sing-box version
 
-          echo "🔧 解析代理链接，生成 sing-box 配置..."
-          python3 linktosb.py "$PROXY_URL" -o singbox.json --port 8080
+          # 代理启动函数写成文件，供「执行续期」步骤在主用失败后切换备用时复用
+          cat > proxy_lib.sh <<'SH'
+          # 用法: start_proxy <线路名> <代理链接>   成功返回 0，失败返回 1
+          mask_ip() { sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/g'; }
 
-          echo "🔍 检查 sing-box 配置..."
-          if ! ./sing-box check -c singbox.json; then
-            echo "❌ sing-box 配置检查失败，当前配置如下："
-            cat singbox.json
-            exit 1
-          fi
+          start_proxy() {
+            local ROLE="$1" URL="$2" PID OUT CURL_STATUS
+            pkill -f "sing-box run" >/dev/null 2>&1 || true
+            sleep 1
 
-          echo "🚀 启动 sing-box..."
-          nohup ./sing-box run -c singbox.json > singbox.log 2>&1 &
-          SB_PID=$!
-
-          sleep 3
-
-          if ! kill -0 "$SB_PID" 2>/dev/null; then
-            echo "❌ sing-box 启动后异常退出，日志如下："
-            cat singbox.log
-            exit 1
-          fi
-
-          echo "✅ sing-box 已启动，测试代理连通性..."
-
-          # curl 放进 if 判断中，可避免 set -e 在 curl 失败时提前中断步骤。
-          if CURL_OUT=$(curl -sS -m 12 \
-            --proxy http://127.0.0.1:8080 \
-            https://api.ipify.org); then
-
-            if [ -z "$CURL_OUT" ]; then
-              echo "❌ 代理连接成功，但出口 IP 接口未返回内容。"
-              echo "----- sing-box 日志 -----"
-              cat singbox.log
-              exit 1
+            echo "🔧 [$ROLE] 解析代理链接，生成 sing-box 配置..."
+            if ! python3 linktosb.py "$URL" -o singbox.json --port 8080; then
+              echo "❌ [$ROLE] 代理链接解析失败，请检查链接格式。"
+              return 1
             fi
 
-            MASKED_IP=$(echo "$CURL_OUT" | sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/')
-            echo "✅ 代理出口 IP（已脱敏）：$MASKED_IP"
-          else
-            CURL_STATUS=$?
-            echo "❌ sing-box 代理连通性测试失败，curl exit code: $CURL_STATUS"
-            echo "----- sing-box 日志 -----"
-            cat singbox.log
-            exit 1
+            echo "🔍 [$ROLE] 检查 sing-box 配置..."
+            if ! ./sing-box check -c singbox.json; then
+              echo "❌ [$ROLE] sing-box 配置检查失败。"
+              return 1
+            fi
+
+            echo "🚀 [$ROLE] 启动 sing-box..."
+            nohup ./sing-box run -c singbox.json > singbox.log 2>&1 &
+            PID=$!
+            sleep 3
+
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "❌ [$ROLE] sing-box 启动后异常退出，日志（已打码 IP）如下："
+              tail -n 20 singbox.log | mask_ip
+              return 1
+            fi
+
+            echo "✅ [$ROLE] sing-box 已启动，测试代理连通性..."
+            # curl 放进 if 判断中，避免 set -e 在 curl 失败时提前中断步骤
+            if OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://api.ipify.org); then
+              if [ -z "$OUT" ]; then
+                echo "❌ [$ROLE] 代理连接成功，但出口 IP 接口未返回内容。"
+                tail -n 20 singbox.log | mask_ip
+                return 1
+              fi
+              echo "✅ [$ROLE] 代理出口 IP（已脱敏）：$(echo "$OUT" | mask_ip)"
+              return 0
+            else
+              CURL_STATUS=$?
+              echo "❌ [$ROLE] 代理连通性测试失败，curl exit code: $CURL_STATUS"
+              tail -n 20 singbox.log | mask_ip
+              return 1
+            fi
+          }
+          SH
+
+          source ./proxy_lib.sh
+          ROLE="主用"
+          if ! start_proxy "主用" "$PROXY_URL"; then
+            if [ -n "$PROXY_URL_BACKUP" ]; then
+              echo "⚠️ 主用代理不可用，切换备用代理..."
+              if start_proxy "备用" "$PROXY_URL_BACKUP"; then
+                ROLE="备用"
+              else
+                echo "❌ 主用与备用代理均不可用。"
+                exit 1
+              fi
+            else
+              echo "❌ 主用代理不可用，且未设置备用代理 PROXY_URL_BACKUP。"
+              exit 1
+            fi
           fi
+          # 记录当前线路，后续步骤和脚本（通知里提示）都会读到
+          echo "PROXY_ROLE=$ROLE" >> "$GITHUB_ENV"
+          echo "🧭 当前代理线路：$ROLE"
 
       - name: 🔧 执行续期
         id: renew
         env:
           XSERVER_GAME_ACCOUNT: ${{ secrets.XSERVER_GAME_ACCOUNT }}
           PROXY_URL: ${{ secrets.PROXY_URL }}
+          PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
           TG_BOT: ${{ secrets.TG_BOT }}
           SINGBOX_LOG_PATH: singbox.log
           # 过盾：xvfb(1920x1080) 下跑有头模式 + 真 Chrome（与参考项目一致）
@@ -122,7 +152,28 @@ jobs:
           TURNSTILE_CHANNEL: chrome
           # 可选：浏览器过盾全部失败后的 CapSolver 打码兜底（没设 secret 则自动不启用）
           CAPSOLVER_KEY: ${{ secrets.CAPSOLVER_KEY }}
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 -u xserver_game_renew.py
+        run: |
+          run_renew() {
+            PROXY_ROLE="$1" xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 -u xserver_game_renew.py
+          }
+
+          set +e
+          run_renew "$PROXY_ROLE"
+          RC=$?
+
+          # 主用线路续期失败 → 切备用代理再试一次（只在设置了备用代理且当前是主用时触发）
+          if [ "$RC" -ne 0 ] && [ -n "$PROXY_URL" ] && [ -n "$PROXY_URL_BACKUP" ] && [ "$PROXY_ROLE" = "主用" ]; then
+            echo "⚠️ 主用代理续期失败（exit $RC），切换备用代理再试一次..."
+            source ./proxy_lib.sh
+            if start_proxy "备用" "$PROXY_URL_BACKUP"; then
+              echo "PROXY_ROLE=备用" >> "$GITHUB_ENV"
+              run_renew "备用"
+              RC=$?
+            else
+              echo "❌ 备用代理启动失败，保留主用线路的失败结果。"
+            fi
+          fi
+          exit "$RC"
 
       - name: 📸 上传过盾失败截图（如有）
         if: always()
