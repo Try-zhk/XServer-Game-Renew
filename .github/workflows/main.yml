@@ -2,42 +2,61 @@ name: XServer-Game-Renew
 
 on:
   workflow_dispatch:
+  schedule:
+    # 初始兜底时间（每次运行后会被脚本根据实际剩余时间 + 随机延迟自动刷新）
+    - cron: '25 */4 * * *'
+
+permissions:
+  contents: write
 
 jobs:
   renew:
     runs-on: ubuntu-latest
-    # 主用 + 备用最多跑两轮续期，最坏情况耗时翻倍，放宽到 25 分钟
+    # 主用 + 备用最多跑两轮续期，放宽到 25 分钟
     timeout-minutes: 25
 
     steps:
-      - name: 📥 拉取本库脚本
+      - name: 📥 拉取本库脚本（浅克隆提速）
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      - name: 📥 拉取私库脚本
+      - name: 📥 拉取私库脚本（浅克隆提速）
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/XServer-Game-Renew-Private
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
+          fetch-depth: 1
 
       - name: 📂 复制脚本到工作目录
         run: |
           cp private/xserver_game_renew.py xserver_game_renew.py
           cp private/linktosb.py linktosb.py
 
-      - name: 🐍 安装 Python 依赖
-        run: pip install requests --quiet
+      - name: 🐍 启用 Python 与 pip 缓存
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
-      - name: 🌐 安装浏览器依赖（patchright + 真 Chrome，Turnstile 过盾用）
+      - name: ⚡ 缓存 pip 下载包
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-xserver-v1
+          restore-keys: |
+            ${{ runner.os }}-pip-xserver-
+
+      - name: 🌐 安装 Python 与浏览器依赖（保留真 Chrome 与日文字体）
         run: |
-          pip install patchright --quiet
-          # ubuntu-latest 自带 Google Chrome 和 xvfb，有就直接用；缺哪个才补装（省下近 3 分钟）
+          pip install requests patchright --quiet
+          # ubuntu-latest 自带 Google Chrome 和 xvfb，有就直接用；缺哪个才补装
           google-chrome --version || python -m patchright install --with-deps chrome
           command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
-          # 日文字体：让失败截图里的日文正常显示，也让浏览器字体环境更接近真实桌面
+          # 保留日文字体：让失败截图里的日文正常显示，也让浏览器字体指纹更接近真实桌面
           sudo apt-get install -y -qq --no-install-recommends fonts-ipafont-gothic || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends fonts-ipafont-gothic; }
 
-      - name: 🛡️ 启动 sing-box 代理转发（主用，不可用时自动切备用）
+      - name: 🛡️ 启动 sing-box 代理转发（端口轮询秒启 + 主备自动切换）
         env:
           PROXY_URL: ${{ secrets.PROXY_URL }}
           PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
@@ -50,14 +69,13 @@ jobs:
           echo "📦 在私库里查找 sing-box 压缩包..."
           SB_ARCHIVE=$(ls private/sing-box-*-linux-amd64.tar.gz 2>/dev/null | head -n1)
           if [ -z "$SB_ARCHIVE" ]; then
-            echo "❌ 私库里没找到 sing-box-*-linux-amd64.tar.gz，请检查是否已上传（文件名需匹配这个模式）。"
+            echo "❌ 私库里没找到 sing-box-*-linux-amd64.tar.gz，请检查是否已上传。"
             exit 1
           fi
 
           MATCH_COUNT=$(ls private/sing-box-*-linux-amd64.tar.gz 2>/dev/null | wc -l)
           if [ "$MATCH_COUNT" -gt 1 ]; then
             echo "⚠️  私库里有多个 sing-box 压缩包，取到的是: $SB_ARCHIVE"
-            echo "⚠️  建议只保留一个版本，避免以后自己也搞混用的是哪个。"
           fi
           echo "📦 使用: $SB_ARCHIVE"
 
@@ -69,13 +87,12 @@ jobs:
 
           # 代理启动函数写成文件，供「执行续期」步骤在主用失败后切换备用时复用
           cat > proxy_lib.sh <<'SH'
-          # 用法: start_proxy <线路名> <代理链接>   成功返回 0，失败返回 1
           mask_ip() { sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/g'; }
 
           start_proxy() {
             local ROLE="$1" URL="$2" PID OUT CURL_STATUS
             pkill -f "sing-box run" >/dev/null 2>&1 || true
-            sleep 1
+            sleep 0.3
 
             echo "🔧 [$ROLE] 解析代理链接，生成 sing-box 配置..."
             if ! python3 linktosb.py "$URL" -o singbox.json --port 8080; then
@@ -92,16 +109,29 @@ jobs:
             echo "🚀 [$ROLE] 启动 sing-box..."
             nohup ./sing-box run -c singbox.json > singbox.log 2>&1 &
             PID=$!
-            sleep 3
 
-            if ! kill -0 "$PID" 2>/dev/null; then
-              echo "❌ [$ROLE] sing-box 启动后异常退出，日志（已打码 IP）如下："
+            # 0.2s 高频轮询本地 8080 端口就绪，替代原来的固定 sleep 3
+            local READY=0
+            for _ in $(seq 1 25); do
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "❌ [$ROLE] sing-box 启动后异常退出，日志（已打码 IP）如下："
+                tail -n 20 singbox.log | mask_ip
+                return 1
+              fi
+              if (echo > /dev/tcp/127.0.0.1/8080) >/dev/null 2>&1; then
+                READY=1
+                break
+              fi
+              sleep 0.2
+            done
+
+            if [ "$READY" -ne 1 ]; then
+              echo "❌ [$ROLE] sing-box 端口 8080 未在 5s 内监听"
               tail -n 20 singbox.log | mask_ip
               return 1
             fi
 
-            echo "✅ [$ROLE] sing-box 已启动，测试代理连通性..."
-            # 连通性以"非 CF 站点（AWS）"为准，失败再回退 ipify；CF 站点只做信息提示，不影响判定
+            echo "✅ [$ROLE] sing-box 端口已就绪，测试代理连通性..."
             if OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://checkip.amazonaws.com) \
                || OUT=$(curl -sS -m 12 --proxy http://127.0.0.1:8080 https://api.ipify.org); then
               OUT=$(echo "$OUT" | tr -d '[:space:]')
@@ -149,7 +179,6 @@ jobs:
               exit 1
             fi
           fi
-          # 记录当前线路，后续步骤和脚本（通知里提示）都会读到
           echo "PROXY_ROLE=$ROLE" >> "$GITHUB_ENV"
           echo "🧭 当前代理线路：$ROLE"
 
@@ -161,10 +190,9 @@ jobs:
           PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
           TG_BOT: ${{ secrets.TG_BOT }}
           SINGBOX_LOG_PATH: singbox.log
-          # 过盾：xvfb(1920x1080) 下跑有头模式 + 真 Chrome（与参考项目一致）
+          NEXT_SCHEDULE_FILE: next_schedule.json
           TURNSTILE_HEADLESS: "0"
           TURNSTILE_CHANNEL: chrome
-          # 可选：浏览器过盾全部失败后的 CapSolver 打码兜底（没设 secret 则自动不启用）
           CAPSOLVER_KEY: ${{ secrets.CAPSOLVER_KEY }}
         run: |
           run_renew() {
@@ -175,7 +203,7 @@ jobs:
           run_renew "$PROXY_ROLE"
           RC=$?
 
-          # 主用线路续期失败 → 切备用代理再试一次（只在设置了备用代理且当前是主用时触发）
+          # 主用线路续期失败 → 切备用代理再试一次
           if [ "$RC" -ne 0 ] && [ -n "$PROXY_URL" ] && [ -n "$PROXY_URL_BACKUP" ] && [ "$PROXY_ROLE" = "主用" ]; then
             echo "⚠️ 主用代理续期失败（exit $RC），切换备用代理再试一次..."
             source ./proxy_lib.sh
@@ -188,6 +216,86 @@ jobs:
             fi
           fi
           exit "$RC"
+
+      - name: ⏰ 刷新下次自动续期时间（带随机延迟写入公开库 Cron）
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os, re, random
+          from datetime import datetime, timedelta, timezone
+          from zoneinfo import ZoneInfo
+
+          CN_TZ = ZoneInfo("Asia/Shanghai")
+          now_utc = datetime.now(timezone.utc)
+          sched_file = "next_schedule.json"
+
+          if os.path.isfile(sched_file):
+              with open(sched_file, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              next_cron = data["cron"]
+              next_cn_str = data["next_run_cn"]
+              jitter_min = data["jitter_minutes"]
+              reason_str = data["reason"]
+              deadline_str = data.get("deadline", "未知")
+              status_str = data.get("result", "未知")
+          else:
+              # 若在进入 Python 脚本前（如代理阶段）就挂了，设置 40~60 分钟后自动重试
+              jitter_min = random.randint(40, 60)
+              target_utc = now_utc + timedelta(minutes=jitter_min)
+              next_cron = f"{target_utc.minute} {target_utc.hour} {target_utc.day} {target_utc.month} *"
+              next_cn_str = target_utc.astimezone(CN_TZ).strftime("%Y-%m-%d %H:%M (北京时间)")
+              reason_str = f"前置步骤异常，已安排 {jitter_min} 分钟后自动重试"
+              deadline_str = "未知"
+              status_str = "❌ 前置失败"
+
+          # 1. 动态更新公开库工作流里的 cron 表达式
+          wf_candidates = [".github/workflows/main.yml", ".github/workflows/main.yaml"]
+          updated_wf = None
+          for wf in wf_candidates:
+              if os.path.isfile(wf):
+                  with open(wf, "r", encoding="utf-8") as f:
+                      content = f.read()
+                  new_content, n = re.subn(
+                      r"(-\s*cron:\s*['\"])([^'\"]+)(['\"])",
+                      rf"\g<1>{next_cron}\g<3>",
+                      content,
+                      count=1,
+                  )
+                  if n > 0:
+                      with open(wf, "w", encoding="utf-8") as f:
+                          f.write(new_content)
+                      updated_wf = wf
+                      break
+
+          # 2. 生成/刷新公开库续期排期看板文件 RENEW_SCHEDULE.md
+          run_time_cn = now_utc.astimezone(CN_TZ).strftime("%Y-%m-%d %H:%M:%S (北京时间)")
+          md_content = (
+              "# 🎮 XServer GAME 自动续期排期状态\n\n"
+              f"- **上次运行时间**：`{run_time_cn}`\n"
+              f"- **上次运行结果**：`{status_str}`\n"
+              f"- **当前服务器到期时间**：`{deadline_str}`\n"
+              f"- **下次自动启动时间**：`{next_cn_str}`（含随机延迟 `+{jitter_min} 分钟`）\n"
+              f"- **下次 GitHub Cron (UTC)**：`{next_cron}`\n"
+              f"- **排期依据**：{reason_str}\n"
+          )
+          with open("RENEW_SCHEDULE.md", "w", encoding="utf-8") as f:
+              f.write(md_content)
+
+          print(f"⏰ 已刷新下次自启动时间: {next_cn_str} | Cron(UTC): '{next_cron}' | 原因: {reason_str}")
+          if updated_wf:
+              print(f"📝 已更新工作流文件: {updated_wf}")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/workflows/ RENEW_SCHEDULE.md 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(schedule): 刷新下次续期时间 [skip ci]"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}" || echo "⚠️ 推送排期更新失败（请检查仓库 Actions 读写权限）"
+          else
+            echo "ℹ️ 排期无变化，无需提交。"
+          fi
 
       - name: 📸 上传过盾失败截图（如有）
         if: always()
