@@ -1,7 +1,13 @@
 name: XServer-Game-Renew
 
 on:
+  # 由外部定时（cron 面板）通过 workflow_dispatch 触发
   workflow_dispatch:
+
+# 同一时刻只跑一个：避免外部定时重复触发时两次运行同时续期
+concurrency:
+  group: xserver-game-renew
+  cancel-in-progress: false
 
 jobs:
   renew:
@@ -12,8 +18,6 @@ jobs:
     steps:
       - name: 📥 拉取本库脚本
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
 
       - name: 📥 拉取私库脚本
         uses: actions/checkout@v4
@@ -21,25 +25,19 @@ jobs:
           repository: ${{ github.repository_owner }}/XServer-Game-Renew-Private
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
           path: private
-          fetch-depth: 1
 
       - name: 📂 复制脚本到工作目录
         run: |
           cp private/xserver_game_renew.py xserver_game_renew.py
           cp private/linktosb.py linktosb.py
 
-      - name: ⚡ 缓存 pip 下载包
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-xserver-v1
-          restore-keys: |
-            ${{ runner.os }}-pip-xserver-
+      - name: 🐍 安装 Python 依赖
+        run: pip install requests --quiet
 
-      - name: 🌐 安装 Python 与浏览器依赖（patchright + 真 Chrome + 日文字体）
+      - name: 🌐 安装浏览器依赖（patchright + 真 Chrome，Turnstile 过盾用）
         run: |
-          pip install requests patchright --quiet
-          # ubuntu-latest 自带 Google Chrome 和 xvfb，有就直接用；缺哪个才补装
+          pip install patchright --quiet
+          # ubuntu-latest 自带 Google Chrome 和 xvfb，有就直接用；缺哪个才补装（省下近 3 分钟）
           google-chrome --version || python -m patchright install --with-deps chrome
           command -v xvfb-run >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq xvfb; }
           # 日文字体：让失败截图里的日文正常显示，也让浏览器字体环境更接近真实桌面
@@ -81,9 +79,9 @@ jobs:
           mask_ip() { sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/g'; }
 
           start_proxy() {
-            local ROLE="$1" URL="$2" PID OUT CURL_STATUS READY=0
+            local ROLE="$1" URL="$2" PID OUT CURL_STATUS
             pkill -f "sing-box run" >/dev/null 2>&1 || true
-            sleep 0.3
+            sleep 1
 
             echo "🔧 [$ROLE] 解析代理链接，生成 sing-box 配置..."
             if ! python3 linktosb.py "$URL" -o singbox.json --port 8080; then
@@ -100,23 +98,10 @@ jobs:
             echo "🚀 [$ROLE] 启动 sing-box..."
             nohup ./sing-box run -c singbox.json > singbox.log 2>&1 &
             PID=$!
+            sleep 3
 
-            # 0.2s 高频轮询本地 8080 端口就绪，替代原来的固定 sleep 3
-            for _ in $(seq 1 25); do
-              if ! kill -0 "$PID" 2>/dev/null; then
-                echo "❌ [$ROLE] sing-box 启动后异常退出，日志（已打码 IP）如下："
-                tail -n 20 singbox.log | mask_ip
-                return 1
-              fi
-              if (echo > /dev/tcp/127.0.0.1/8080) >/dev/null 2>&1; then
-                READY=1
-                break
-              fi
-              sleep 0.2
-            done
-
-            if [ "$READY" -ne 1 ]; then
-              echo "❌ [$ROLE] sing-box 端口 8080 未在 5s 内监听，日志如下："
+            if ! kill -0 "$PID" 2>/dev/null; then
+              echo "❌ [$ROLE] sing-box 启动后异常退出，日志（已打码 IP）如下："
               tail -n 20 singbox.log | mask_ip
               return 1
             fi
@@ -170,6 +155,7 @@ jobs:
               exit 1
             fi
           fi
+          # 记录当前线路，后续步骤和脚本（通知里提示）都会读到
           echo "PROXY_ROLE=$ROLE" >> "$GITHUB_ENV"
           echo "🧭 当前代理线路：$ROLE"
 
@@ -181,10 +167,10 @@ jobs:
           PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
           TG_BOT: ${{ secrets.TG_BOT }}
           SINGBOX_LOG_PATH: singbox.log
-          # 过盾：xvfb(1920x1080) 下跑有头模式 + 真 Chrome
+          # 过盾：xvfb(1920x1080) 下跑有头模式 + 真 Chrome（与参考项目一致）
           TURNSTILE_HEADLESS: "0"
           TURNSTILE_CHANNEL: chrome
-          # 可选：浏览器过盾全部失败后的 CapSolver 打码兜底
+          # 可选：浏览器过盾全部失败后的 CapSolver 打码兜底（没设 secret 则自动不启用）
           CAPSOLVER_KEY: ${{ secrets.CAPSOLVER_KEY }}
         run: |
           run_renew() {
@@ -195,8 +181,13 @@ jobs:
           run_renew "$PROXY_ROLE"
           RC=$?
 
+          # 退出码 3 = XServer 站点侧异常（维护/拥堵），换代理没用，不切备用，等下次计划时间再来
+          if [ "$RC" -eq 3 ]; then
+            echo "🛠 XServer 站点侧异常，不切换备用代理（换线路没用），等外部定时下次再触发。"
+          fi
+
           # 主用线路续期失败 → 切备用代理再试一次（只在设置了备用代理且当前是主用时触发）
-          if [ "$RC" -ne 0 ] && [ -n "$PROXY_URL" ] && [ -n "$PROXY_URL_BACKUP" ] && [ "$PROXY_ROLE" = "主用" ]; then
+          if [ "$RC" -ne 0 ] && [ "$RC" -ne 3 ] && [ -n "$PROXY_URL" ] && [ -n "$PROXY_URL_BACKUP" ] && [ "$PROXY_ROLE" = "主用" ]; then
             echo "⚠️ 主用代理续期失败（exit $RC），切换备用代理再试一次..."
             source ./proxy_lib.sh
             if start_proxy "备用" "$PROXY_URL_BACKUP"; then
