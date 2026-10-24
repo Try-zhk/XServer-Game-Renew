@@ -1,8 +1,13 @@
 name: XServer-Game-Renew
 
 on:
-  # 由外部定时（cron 面板）通过 workflow_dispatch 触发
+  # 由外部定时（cron 面板）通过 workflow_dispatch 触发；手动触发时可勾选浏览器调试模式
   workflow_dispatch:
+    inputs:
+      browser_mode:
+        description: "🧪 真浏览器全程调试模式（=RENEW_MODE browser，默认不勾选走原 requests 路线）"
+        type: boolean
+        default: false
 
 # 同一时刻只跑一个：避免外部定时重复触发时两次运行同时续期
 concurrency:
@@ -79,9 +84,18 @@ jobs:
           mask_ip() { sed -E 's/([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+/\1.**/g'; }
 
           start_proxy() {
-            local ROLE="$1" URL="$2" PID OUT CURL_STATUS
+            local ROLE="$1" URL="$2" PID OUT CURL_STATUS i
             pkill -f "sing-box run" >/dev/null 2>&1 || true
-            sleep 1
+            # 等旧进程真正释放 8080 端口（最多约 5 秒），否则新 sing-box 绑定会失败，
+            # 把"切换备用"误判成"备用代理不可用"
+            for i in $(seq 1 10); do
+              ss -ltn 2>/dev/null | grep -q ':8080 ' || break
+              sleep 0.5
+            done
+            if ss -ltn 2>/dev/null | grep -q ':8080 '; then
+              pkill -9 -f "sing-box run" >/dev/null 2>&1 || true
+              sleep 1
+            fi
 
             echo "🔧 [$ROLE] 解析代理链接，生成 sing-box 配置..."
             if ! python3 linktosb.py "$URL" -o singbox.json --port 8080; then
@@ -167,6 +181,10 @@ jobs:
           PROXY_URL_BACKUP: ${{ secrets.PROXY_URL_BACKUP }}
           TG_BOT: ${{ secrets.TG_BOT }}
           SINGBOX_LOG_PATH: singbox.log
+          # 单次脚本运行的全局时限：主用+备用共用一个 25 分钟 job，单次 660s 给安装/代理切换/截图上传留余量
+          MAX_RUN_SECONDS: "660"
+          # 手动调试开关：勾选 browser_mode 时全程真浏览器（RENEW_MODE=browser），默认原 requests 路线
+          RENEW_MODE: ${{ github.event.inputs.browser_mode == 'true' && 'browser' || 'requests' }}
           # 过盾：xvfb(1920x1080) 下跑有头模式 + 真 Chrome（与参考项目一致）
           TURNSTILE_HEADLESS: "0"
           TURNSTILE_CHANNEL: chrome
